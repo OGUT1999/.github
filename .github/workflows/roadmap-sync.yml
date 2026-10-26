@@ -16,11 +16,8 @@ on:
         description: "Dry run: print the changes, write nothing"
         type: boolean
         default: false
-  pull_request:
-    paths:
-      - "scripts/roadmap-sync.mjs"
-      - "tests/roadmap-sync.test.mjs"
-      - ".github/workflows/roadmap-sync.yml"
+  # Called by ci-gate.yml on every pull request (which suites apply is decided there, by scripts/ci-scope.mjs).
+  workflow_call:
 
 permissions:
   contents: read
