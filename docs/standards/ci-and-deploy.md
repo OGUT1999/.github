@@ -230,3 +230,11 @@ Phase 1 piloted both on `krizaka-com`, `orazaka-knowledge-service` and `akinaza`
 - App Platform's `ingress.rules[].match` takes `path` and `authority`, each with `prefix` **or** `exact`. **No regex** (checked 2026-10-21: absent from the app-spec reference; `doctl apps spec validate` answers `unknown field "regex"`; regex exists only in `cors`).
 - So a spec keeps **one broad prefix per component** (`/`, plus one sibling-service prefix such as `/api` or `/edge`), and the fine routing — redirects, locale, which page — is done **in the app** with regex or matchers (Next.js `proxy.ts` / `next.config` `redirects` with `source` patterns, Spring path patterns), as tested code.
 - `krizaka-deploy` refuses a spec with more than `MAX_PATH_RULES` (3) routing rules (those with a `component`) for one component (`assertIngressRoutes`, run by `deploy --apply`). Redirects of **retired URLs** keep their real 308 in the spec, capped at `MAX_REDIRECT_RULES` (10) per app, all listed there; more than that belongs in the app. Offline, in a repository's CI: `krizaka-deploy routes deploy/…/app.yaml`. Authority-only rules (the apex → www 308) are free.
+
+## This repository's own CI — `CI gate`
+
+The suites of krizaka/.github itself (workflow lint, the CI self-test, the org profile, the registry, the repository names, the roadmap sync) were
+path-filtered workflows, which cannot be required (a PR outside their paths would wait forever); two PRs merged with a red `test`. They are now
+called by [`ci-gate.yml`](../../.github/workflows/ci-gate.yml) on **every** pull request; `scripts/ci-scope.mjs` (tested) decides which apply from the
+changed files, read from the base branch so a PR cannot narrow its own checks; a suite that does not apply is skipped, and the job `CI gate` fails
+when an applicable one did not succeed. Fail-open: a broken scope runs everything. **Required checks on main: `CI gate` and `SonarCloud Code Analysis`** (CodeQL stays its own).
