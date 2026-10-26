@@ -336,3 +336,65 @@ test("mobile-e2e: the demo account is masked, scrubbed from the reports, and onl
   const secrets = src.slice(src.indexOf("    secrets:\n"), src.indexOf("    outputs:\n"));
   assert.deepEqual([...secrets.matchAll(/^ {6}([A-Z_]+):$/gm)].map((m) => m[1]).sort(), ["DEMO_ACCOUNT_EMAIL", "DEMO_ACCOUNT_PASSWORD"]);
 });
+
+// --- SonarCloud after the tests, the image after verify and scanned (krizaka/.github#237).
+test("node gate: SonarCloud wanted must succeed after a green verify; a skip or failure is red; docs-only stays green", () => {
+  const wanted = { SONAR_WANTED: "true" };
+  assert.equal(runGate("node-ci", NODE({ ...wanted, SONAR: "success" })).status, 0);
+  assert.equal(runGate("node-ci", NODE({ ...wanted, SONAR: "failure" })).status, 1);
+  assert.equal(runGate("node-ci", NODE({ ...wanted, SONAR: "skipped" })).status, 1);
+  assert.equal(runGate("node-ci", NODE({ ...wanted, CODE: "false", VERIFY: "skipped", SONAR: "skipped" })).status, 0);
+  // verify failed: sonar is rightly skipped, the gate is red once (by verify)
+  assert.equal(runGate("node-ci", NODE({ ...wanted, VERIFY: "failure", SONAR: "skipped" })).status, 1);
+  // not wanted: no effect
+  assert.equal(runGate("node-ci", NODE({ SONAR: "skipped" })).status, 0);
+});
+
+test("node gate: the image is not built when verify failed — verify alone makes the gate red", () => {
+  const vars = NODE({ VERIFY: "failure", CONTAINER_WANTED: "true", CONTAINER: "skipped" });
+  assert.deepEqual(runGate("node-ci", vars), { status: 1, result: "failure" });
+});
+
+test("java and python gates: SonarCloud wanted must succeed; not wanted changes nothing", () => {
+  assert.equal(runGate("java-ci", JAVA({ SONAR_WANTED: "true", SONAR: "success" })).status, 0);
+  assert.equal(runGate("java-ci", JAVA({ SONAR_WANTED: "true", SONAR: "skipped" })).status, 1);
+  assert.equal(runGate("java-ci", JAVA({ SONAR_WANTED: "true", SONAR: "failure" })).status, 1);
+  assert.equal(runGate("java-ci", JAVA({ SONAR: "skipped" })).status, 0);
+  assert.equal(runGate("python-ci", SIMPLE({ SONAR_WANTED: "true", SONAR: "success" })).status, 0);
+  assert.equal(runGate("python-ci", SIMPLE({ SONAR_WANTED: "true", SONAR: "skipped" })).status, 1);
+  assert.equal(runGate("python-ci", SIMPLE({ SONAR_WANTED: "true", SONAR: "failure" })).status, 1);
+});
+
+for (const name of ["node-ci", "java-ci", "python-ci"]) {
+  test(`${name}: the sonar job waits for the tests, uses the org secret, awaits the quality gate and is part of the CI gate`, () => {
+    const src = read(name);
+    const sonar = jobs(src).find((j) => j.id === "sonar");
+    assert.ok(sonar, "a sonar job exists");
+    assert.match(sonar.text, /^ {4}needs: \[changes, (verify|checks)\]$/m);
+    assert.match(sonar.text, /needs\.(verify|checks)\.result == 'success'/);
+    assert.match(sonar.text, /SONAR_TOKEN: \$\{\{ secrets\.SONAR_TOKEN \}\}/);
+    assert.match(sonar.text, /uses: SonarSource\/sonarqube-scan-action@[0-9a-f]{40}/);
+    assert.match(sonar.text, /-Dsonar\.qualitygate\.wait=true/);
+    assert.doesNotMatch(sonar.text, /echo[^\n]*\$SONAR_TOKEN|\$\{\{ *secrets\.SONAR_TOKEN *\}\}[^\n]*\n[^\n]*run:/);
+    assert.match(src, /secrets:\n {6}SONAR_TOKEN:\n[^\n]*\n {8}required: false/);
+    assert.match(jobs(src).find((j) => j.id === "gate").text, /needs: \[[^\]]*\bsonar\b/);
+  });
+}
+
+test("node-ci: the image waits for verify, is scanned (fixable HIGH and CRITICAL fail, written allowlist) with an SBOM, and is never pushed", () => {
+  const src = read("node-ci");
+  const container = jobs(src).find((j) => j.id === "container");
+  assert.match(container.text, /^ {4}needs: \[changes, docker-changes, verify\]$/m);
+  assert.match(container.text, /needs\.verify\.result == 'success' \|\| needs\.verify\.result == 'skipped'/);
+  assert.match(container.text, /uses: aquasecurity\/trivy-action@[0-9a-f]{40}/);
+  assert.match(container.text, /severity: HIGH,CRITICAL/);
+  assert.match(container.text, /ignore-unfixed: true/);
+  assert.match(container.text, /exit-code: "1"/);
+  assert.match(container.text, /trivyignores: \$\{\{ steps\.allow\.outputs\.file \}\}/);
+  assert.match(container.text, /format: cyclonedx/);
+  assert.match(container.text, /name: sbom-cyclonedx/);
+  // scan before the smoke script
+  assert.ok(container.text.indexOf("Scan the image") < container.text.indexOf("script: ${{ inputs.container-smoke }}"));
+  assert.doesNotMatch(src, /push: true|docker push/);
+  assert.match(readFileSync(new URL("../actions/build/action.yml", import.meta.url), "utf8"), /push: false/);
+});

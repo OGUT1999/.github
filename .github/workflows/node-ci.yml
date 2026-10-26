@@ -19,8 +19,13 @@
 #              (PostgreSQL), optional browsers (Playwright, cached) and a repository script after the build. With
 #              `parallel: true` it is a matrix: one leg per task (lint, typecheck, test, build), run side by side.
 #   e2e        optional: Playwright, `e2e-shards` legs in parallel, only when a changed file matches `e2e-relevant`.
-#   container  optional: build the Dockerfile and run a repository smoke script against the image.
-#   gate       ALWAYS reports. Green when every job that had to run succeeded or was legitimately skipped by the gate; red
+#   container  optional, AFTER verify (no image is built when lint or tests fail): build the Dockerfile, scan the image with Trivy
+#              (fails on a fixable HIGH or CRITICAL finding, minus the repository's written allowlist), keep an SBOM
+#              artifact, run a repository smoke script against the image. PR images are never published: the image is
+#              loaded into the runner's daemon only; the deploy builds from main after the merge.
+#   sonar      optional, AFTER verify: the SonarCloud CI analysis with the coverage the test leg uploaded, and the quality gate
+#              awaited. (CodeQL is not here: it scans the source, needs neither build nor tests, and stays its own required check.)
+#   gate       ALWAYS reports (verify, duplication, e2e, container and sonar). Green when every job that had to run succeeded or was legitimately skipped by the gate; red
 #              on a failure, a cancellation or a heavy job skipped without the gate asking for it. Required checks and the
 #              code-scanning ruleset stay satisfied on a docs-only change, and never on a broken one.
 #
@@ -135,6 +140,22 @@ on:
         description: "Restore and save the Playwright browsers cache for the smoke script."
         type: boolean
         default: false
+      container-scan-allowlist:
+        description: "Trivy allowlist (.trivyignore.yaml: id, statement, expired_at per accepted finding), relative to the repository root. Used when the file exists."
+        type: string
+        default: ".trivyignore.yaml"
+      sonar:
+        description: "Run the SonarCloud CI analysis after verify (job `sonar`). Turn off the project's automatic analysis once it is green."
+        type: boolean
+        default: false
+      sonar-coverage-paths:
+        description: "Newline-separated coverage reports (lcov) the test leg uploads for the analysis, relative to working-directory. Globs allowed."
+        type: string
+        default: "coverage/lcov.info"
+      sonar-args:
+        description: "Extra scanner arguments (e.g. -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info). Project settings belong in sonar-project.properties."
+        type: string
+        default: ""
       relevant:
         description: "changes.yml: JavaScript RegExp, a changed file matching it needs the jobs."
         type: string
@@ -183,6 +204,10 @@ on:
         description: "Timeout of the verify job (the container and e2e jobs get the same)."
         type: number
         default: 25
+    secrets:
+      SONAR_TOKEN:
+        description: "SonarCloud token (the org secret). Required when `sonar` is true; never printed."
+        required: false
     outputs:
       result:
         description: "success or failure: the gate's verdict."
@@ -199,6 +224,9 @@ on:
       e2e-result:
         description: "success, failure, cancelled or skipped."
         value: ${{ jobs.gate.outputs.e2e }}
+      sonar-result:
+        description: "success, failure, cancelled or skipped."
+        value: ${{ jobs.gate.outputs.sonar }}
       code:
         description: "'false' when the change needed no heavy job."
         value: ${{ jobs.changes.outputs.code }}
@@ -341,6 +369,38 @@ jobs:
           playwright: ${{ (matrix.task == 'all' || matrix.task == 'build') && inputs.playwright || '' }}
           script: ${{ (matrix.task == 'all' || matrix.task == 'build') && inputs.after-build || '' }}
 
+      # The coverage the analysis reads: only the leg that ran the tests uploads it, as one tar that keeps the paths.
+      - name: Collect the coverage for SonarCloud
+        if: ${{ inputs.sonar && (matrix.task == 'all' || matrix.task == 'test') }}
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          PATHS: ${{ inputs.sonar-coverage-paths }}
+          OUT: ${{ runner.temp }}/sonar-coverage.tar
+        run: |
+          shopt -s globstar nullglob
+          files=()
+          while IFS= read -r pattern; do
+            [ -z "$pattern" ] && continue
+            # shellcheck disable=SC2206  # the pattern is a glob on purpose
+            matches=($pattern)
+            files+=("${matches[@]}")
+          done <<< "$PATHS"
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::warning::no coverage report found ($PATHS): the analysis runs without coverage and the new-code coverage condition will fail"
+            tar -cf "$OUT" --files-from /dev/null
+          else
+            tar -cf "$OUT" "${files[@]}"
+            echo "coverage: ${files[*]}"
+          fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ inputs.sonar && (matrix.task == 'all' || matrix.task == 'test') }}
+        with:
+          name: sonar-coverage
+          path: ${{ runner.temp }}/sonar-coverage.tar
+          retention-days: 1
+          if-no-files-found: error
+
   e2e:
     name: ${{ format('E2E ({0}/{1})', matrix.shard, inputs.e2e-shards) }}
     needs: [changes, ui-changes, plan]
@@ -413,8 +473,9 @@ jobs:
 
   container:
     name: Container image
-    needs: [changes, docker-changes]
-    if: ${{ inputs.container && !cancelled() && (needs.changes.outputs.code != 'false' || needs.docker-changes.outputs.code != 'false') }}
+    # After verify: no image is built when lint or tests fail. A skipped verify (the gate said no code changed) still lets a Docker-file change build.
+    needs: [changes, docker-changes, verify]
+    if: ${{ inputs.container && !cancelled() && (needs.changes.outputs.code != 'false' || needs.docker-changes.outputs.code != 'false') && (needs.verify.result == 'success' || needs.verify.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
@@ -425,7 +486,7 @@ jobs:
           persist-credentials: false
 
       # buildx with the Actions cache (actions/build): layers are restored on every run and written on main only,
-      # so a pull request never pays for the export. The image is loaded into the local daemon for the smoke script.
+      # so a pull request never pays for the export. The image is loaded into the local daemon (never pushed) for the scan and the smoke script.
       - uses: krizaka/.github/actions/build@147c1925368d98fb07887257549db36556644cc5 # main
         with:
           container: "true"
@@ -433,6 +494,43 @@ jobs:
           container-dockerfile: ${{ inputs.container-dockerfile }}
           container-image: ${{ inputs.container-image }}
           container-build-args: ${{ inputs.container-build-args }}
+
+      - name: Allowlist of accepted findings
+        id: allow
+        env:
+          FILE: ${{ inputs.container-scan-allowlist }}
+        run: |
+          if [ -n "$FILE" ] && [ -f "$FILE" ]; then echo "file=$FILE" >> "$GITHUB_OUTPUT"; echo "allowlist: $FILE"; else echo "file=" >> "$GITHUB_OUTPUT"; echo "no allowlist: every fixable HIGH or CRITICAL finding fails"; fi
+
+      # The SBOM first (CycloneDX), kept as an artifact whatever the scan says.
+      - name: SBOM of the image
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ inputs.container-image }}
+          format: cyclonedx
+          output: ${{ runner.temp }}/sbom.cdx.json
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom-cyclonedx
+          path: ${{ runner.temp }}/sbom.cdx.json
+          retention-days: 30
+          if-no-files-found: error
+
+      # Fixable HIGH and CRITICAL findings fail the job. What has no fix yet does not block; an accepted exception is written
+      # in the allowlist with its reason and an expiry, never silenced here.
+      - name: Scan the image (fixable HIGH and CRITICAL fail)
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ inputs.container-image }}
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+          trivyignores: ${{ steps.allow.outputs.file }}
 
       # Node (and pnpm) only for a smoke script that needs them; a build-only job needs neither.
       - uses: krizaka/.github/actions/setup@147c1925368d98fb07887257549db36556644cc5 # main
@@ -453,9 +551,49 @@ jobs:
           script: ${{ inputs.container-smoke }}
           image: ${{ inputs.container-image }}
 
+  sonar:
+    name: SonarCloud
+    needs: [changes, verify]
+    if: ${{ inputs.sonar && !cancelled() && needs.changes.outputs.code != 'false' && needs.verify.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+    steps:
+      - name: The token is there
+        run: |
+          if [ -z "$SONAR_TOKEN" ]; then echo "::error::SONAR_TOKEN is empty: pass the org secret to the workflow (secrets: SONAR_TOKEN) and, for Dependabot, add it as a Dependabot secret"; exit 1; fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0  # blame and new-code detection need the history
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sonar-coverage
+          path: ${{ runner.temp }}/sonar-coverage
+
+      - name: Restore the coverage reports
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          TAR: ${{ runner.temp }}/sonar-coverage/sonar-coverage.tar
+        run: tar -xf "$TAR"
+
+      # CI analysis: the SonarCloud app still decorates the pull request and posts « SonarCloud Code Analysis »; the quality gate is awaited
+      # here so the CI gate carries its verdict too.
+      - uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_HOST_URL: https://sonarcloud.io
+        with:
+          projectBaseDir: ${{ inputs.working-directory }}
+          args: -Dsonar.qualitygate.wait=true ${{ inputs.sonar-args }}
+
   gate:
     name: CI gate
-    needs: [changes, ui-changes, docker-changes, plan, verify, e2e, duplication, container]
+    needs: [changes, ui-changes, docker-changes, plan, verify, e2e, duplication, container, sonar]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -466,6 +604,7 @@ jobs:
       container: ${{ needs.container.result }}
       e2e: ${{ needs.e2e.result }}
       duplication: ${{ needs.duplication.result }}
+      sonar: ${{ needs.sonar.result }}
     steps:
       - id: verdict
         env:
@@ -481,13 +620,15 @@ jobs:
           PLAN: ${{ needs.plan.result }}
           DUP: ${{ needs.duplication.result }}
           DUP_WANTED: ${{ inputs.duplication }}
+          SONAR: ${{ needs.sonar.result }}
+          SONAR_WANTED: ${{ inputs.sonar }}
         run: |
           fail=0
           echo "gate: code=${CODE:-unknown} changes=$CHANGES plan=${PLAN:-success} verify=$VERIFY container=$CONTAINER (container wanted: $CONTAINER_WANTED) e2e=${E2E:-skipped} (wanted: ${E2E_WANTED:-false}, ui=${UI_CODE:-unknown})"
           [ "${PLAN:-success}" = success ] || { echo "::error::plan ${PLAN}"; fail=1; }
           # A broken gate (changes) is never a reason to fail: the heavy jobs ran in full.
           [ "$CHANGES" = success ] || echo "::warning::the changes gate did not succeed ($CHANGES): the jobs ran in full"
-          for pair in "verify:$VERIFY" "container:$CONTAINER" "e2e:${E2E:-skipped}" "duplication:${DUP:-skipped}"; do
+          for pair in "verify:$VERIFY" "container:$CONTAINER" "e2e:${E2E:-skipped}" "duplication:${DUP:-skipped}" "sonar:${SONAR:-skipped}"; do
             case "${pair#*:}" in
               success|skipped) ;;
               *) echo "::error::${pair%%:*} ${pair#*:}"; fail=1 ;;
@@ -498,7 +639,8 @@ jobs:
             [ "$VERIFY" = success ] || { echo "::error::verify must run when the gate did not answer false"; fail=1; }
           fi
           # The image is built unless NEITHER gate answered false: a Dockerfile, a manifest or a lockfile always builds it.
-          if [ "$CONTAINER_WANTED" = "true" ] && { [ "$CODE" != "false" ] || [ "${DOCKER_CODE:-}" != "false" ]; } && [ "$CONTAINER" != success ]; then
+          # It waits for verify: when verify failed, the image was rightly not built and verify already made the gate red.
+          if [ "$CONTAINER_WANTED" = "true" ] && [ "$VERIFY" != failure ] && [ "$VERIFY" != cancelled ] && { [ "$CODE" != "false" ] || [ "${DOCKER_CODE:-}" != "false" ]; } && [ "$CONTAINER" != success ]; then
             echo "::error::container must run when a gate did not answer false"; fail=1
           fi
           # The e2e job runs unless the main gate or the UI gate answered exactly `false`.
@@ -507,6 +649,10 @@ jobs:
           fi
           if [ "$CODE" != "false" ] && [ "${DUP_WANTED:-false}" = "true" ] && [ "${DUP:-skipped}" != success ]; then
             echo "::error::duplication must run when the gate did not answer false"; fail=1
+          fi
+          # SonarCloud runs after a green verify whenever it is wanted: a skip without the gate's `false` is a bug, not a pass.
+          if [ "$CODE" != "false" ] && [ "${SONAR_WANTED:-false}" = "true" ] && [ "$VERIFY" = success ] && [ "${SONAR:-skipped}" != success ]; then
+            echo "::error::sonar must run and succeed when the gate did not answer false"; fail=1
           fi
           if [ "$fail" = 0 ]; then echo "result=success" >> "$GITHUB_OUTPUT"; else echo "result=failure" >> "$GITHUB_OUTPUT"; fi
           {
@@ -518,5 +664,6 @@ jobs:
             echo "| container | $CONTAINER |"
             echo "| duplication | ${DUP:-skipped} |"
             echo "| e2e | ${E2E:-skipped} (ui=${UI_CODE:-unknown}) |"
+            echo "| sonar | ${SONAR:-skipped} |"
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$fail"

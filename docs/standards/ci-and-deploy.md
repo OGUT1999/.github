@@ -22,8 +22,11 @@ jobs:
 | :--- | :--- |
 | `changes` | The [`changes.yml`](../../.github/workflows/changes.yml) gate: a docs-only change skips the heavy jobs. **Fail-open**: the heavy jobs run unless the gate answered exactly `false`. |
 | `verify` | Checkout, install (npm / pnpm store cached), lint, typecheck, tests, build (`.next/cache` restored), optional PostgreSQL, optional Playwright (browsers cached), a repository script after the build. Java: JDK + `~/.m2` cache, `mvnw verify`, OpenRewrite dry run, or the Orazaka workspace flow. |
-| `container` | (node, optional) `docker build`, then a repository smoke script against the image. |
-| `gate` | **Always reports.** Red on a failure, a cancellation, or a heavy job skipped without the gate's `false`; green otherwise. |
+| `container` | (node, optional) **After `verify`**: no image is built when lint or tests fail. `docker build` (loaded into the runner, never pushed), a Trivy scan that **fails on a fixable HIGH or CRITICAL finding** (accepted exceptions live in the repository's `.trivyignore.yaml`: id, statement, `expired_at`), a CycloneDX SBOM artifact, then a repository smoke script against the image. |
+| `sonar` | (optional, `sonar: true`) **After `verify`**: the SonarCloud **CI analysis**, with the coverage the test leg uploaded (lcov, JaCoCo, `coverage.xml`), and the quality gate awaited (`sonar.qualitygate.wait`). `SONAR_TOKEN` is the org secret, passed as `secrets: SONAR_TOKEN`, never printed. The project's automatic analysis is switched off only once this job is green, so a repository is never left unanalysed. |
+| `gate` | **Always reports.** Aggregates verify, duplication, e2e, container and sonar. Red on a failure, a cancellation, or a heavy job skipped without the gate's `false`; green otherwise. One required check, `ci / CI gate`, covers the pipeline. |
+
+**CodeQL stays outside the workflow**, a separate, parallel, required check (default setup + the ruleset): it scans the source and needs neither the build nor the tests, so in parallel it gives the fastest feedback. SonarCloud moved in because coverage only comes from a CI analysis (automatic analysis cannot import it). **Images are published only after the merge**: PR images are never pushed; the deploy builds from the production branch (`krizaka-deploy`, force-rebuild), so only code that passed every required check ships.
 
 Every job has a timeout, every action is pinned by SHA, the token is `contents: read`. The unit tests of the gate verdict are
 `tests/ci-workflows.test.mjs`; `selftest-ci.yml` runs both workflows on the fixtures of `tests/fixtures/` and proves that a relevant
