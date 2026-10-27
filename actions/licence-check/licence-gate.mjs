@@ -31,30 +31,28 @@ export function splitTop(expr, op) {
   return parts.filter(Boolean);
 }
 
+/** True when the parenthesis opened at index 0 closes at the last character. */
+function enclosed(e) {
+  let depth = 0;
+  for (let i = 0; i < e.length - 1; i++) {
+    if (e[i] === "(") depth++;
+    else if (e[i] === ")") depth--;
+    if (depth === 0) return false;
+  }
+  return true;
+}
+
 /** Remove parentheses that enclose the whole expression. */
 export function unwrap(expr) {
   let e = expr.trim();
-  while (e.startsWith("(") && e.endsWith(")")) {
-    let depth = 0;
-    let whole = true;
-    for (let i = 0; i < e.length; i++) {
-      if (e[i] === "(") depth++;
-      if (e[i] === ")") depth--;
-      if (depth === 0 && i < e.length - 1) {
-        whole = false;
-        break;
-      }
-    }
-    if (!whole) break;
-    e = e.slice(1, -1).trim();
-  }
+  while (e.startsWith("(") && e.endsWith(")") && enclosed(e)) e = e.slice(1, -1).trim();
   return e;
 }
 
 /** The class of one licence id: "allowed" | "forbidden" | "unknown". */
 export function classifyId(id, policy) {
-  const [base, exception] = id.trim().split(/\s+WITH\s+/i);
-  if (exception && policy.allowedExceptions.some((x) => x.toLowerCase() === exception.trim().toLowerCase())) return "allowed";
+  const [base, exception] = id.trim().split(/ WITH /i).map((x) => x.trim());
+  if (exception && policy.allowedExceptions.some((x) => x.toLowerCase() === exception.toLowerCase())) return "allowed";
   const match = (list) => list.some((p) => (p.endsWith("*") ? base.startsWith(p.slice(0, -1)) : base === p));
   if (match(policy.forbidden)) return "forbidden";
   if (match(policy.allowed)) return "allowed";
@@ -107,7 +105,7 @@ export function components(sbom) {
 export function inScope(c, policy) {
   if (c.type === "operating-system" || /^pkg:(deb|apk|rpm|alpm)\//.test(c.purl)) return false;
   if (policy.firstParty.some((p) => c.purl.includes(p) || c.name.startsWith(p))) return false;
-  if (/^com\.github\.krizaka\//.test(c.name)) return false; // the repository itself, in GitHub's SBOM
+  if (c.name.startsWith("com.github.krizaka/")) return false; // the repository itself, in GitHub's SBOM
   return true;
 }
 
@@ -131,7 +129,10 @@ export function evaluate(list, policy, exceptions = [], today = new Date().toISO
 }
 
 export function report(r) {
-  const row = (c) => `| ${c.name} | ${c.version} | \`${c.licence}\` |${c.reason ? ` ${c.reason} (until ${c.expires ?? "—"}) |` : ""}`;
+  const row = (c) => {
+    const reason = c.reason ? " " + c.reason + " (until " + (c.expires ?? "—") + ") |" : "";
+    return `| ${c.name} | ${c.version} | \`${c.licence}\` |${reason}`;
+  };
   const lines = [
     "## Licence gate",
     "",
