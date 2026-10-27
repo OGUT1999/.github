@@ -1,4 +1,4 @@
-# The CLA check of a Krizaka product repository (ADR-011 §4): external contributors sign the Krizaka CLA once from their PR.
+# The CLA check of a Krizaka product repository (ADR-012 §4): external contributors sign the Krizaka CLA once from their PR.
 # Libraries (Apache-2.0) do not add this workflow: they use the DCO sign-off.
 name: CLA
 

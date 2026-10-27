@@ -1,4 +1,4 @@
-# The CLA check of the Krizaka product repositories (ADR-011 §4, krizaka/.github#293). Reusable: a product repository's
+# The CLA check of the Krizaka product repositories (ADR-012 §4, krizaka/.github#293). Reusable: a product repository's
 # .github/workflows/cla.yml calls it (template: workflow-templates/cla.yml) on pull_request_target and issue_comment.
 #
 # A contributor who has not signed gets a comment with the link to CLA.md and the sentence to post; the check turns green
