@@ -173,3 +173,10 @@ The charter (`AGENTS.template.md`) gets one line under §7: « Static rules: you
 | 6 | **krizaka-platform-kit** (Java pilot) | nine governance tests → `KrizakaRules.buildingBlock` + local rules | same test results |
 | 7 | **orazaka-build + one service** (orazaka-edge) | `GovernanceRules` drops the 17 duplicates (delegates to `CodeRules`); `EdgeGovernanceTest` on `KrizakaRules.service` + Orazaka's rules | same results; `archunit_store/` unchanged |
 | 8+ | the rest, one PR each: kachizaka, orochia, yasakia, orazaka-web-client, template-next-app, krizaka-ts, krizaka-ui itself; then the repositories without ast-grep today (mobile, design systems, cli, blog, motion, yororis) at their current counts; then the Orazaka services; the AGENTS.template.md and CONTRIBUTING §10 change last | per row |
+
+## Issue tree
+
+Every issue has an org **issue type** (Feature, Bug or Task), and every Bug and Task is a **sub-issue of a Feature** (GitHub
+sub-issues, across repositories). A Feature that grows is split into sub-issues. `Issue tree audit`
+(`.github/workflows/issue-tree-audit.yml`, daily) comments once on each offender of the Krizaka Roadmap project, labels it
+`needs-triage` and fails when the count grows against `issue-tree-baseline.json`.

@@ -1,0 +1,68 @@
+# Issue tree audit (docs/standards/rules.md#issue-tree): every open issue of the org project « Krizaka Roadmap » has an issue
+# type, and every Bug and Task a parent Feature. The offenders get ONE comment and the label `needs-triage`; the run fails when
+# their count grows against issue-tree-baseline.json (a ratchet: the count only goes down). Rules: scripts/issue-tree-audit.mjs.
+# The token is the Krizaka Agents app's (Issues: write, Organization projects: read). `issues: opened` fires for this repository's
+# own issues only (GitHub does not deliver the event across repositories): the daily run covers the org.
+name: Issue tree audit
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      dry:
+        description: "Dry run: list, comment nothing"
+        type: boolean
+        default: false
+  issues:
+    types: [opened]
+  pull_request:
+    paths:
+      - scripts/issue-tree-audit.mjs
+      - tests/issue-tree-audit.test.mjs
+      - issue-tree-baseline.json
+      - .github/workflows/issue-tree-audit.yml
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Audit rules
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - run: node --test tests/issue-tree-audit.test.mjs
+
+  audit:
+    name: Org issue tree
+    if: ${{ github.event_name != 'pull_request' }}
+    needs: unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: krizaka # zizmor: ignore[github-app] the audit comments on issues of every repository of the org, by design
+          permission-issues: write
+          permission-organization-projects: read
+          permission-metadata: read
+      - run: node scripts/issue-tree-audit.mjs ${DRY:+"$DRY"} # zizmor: ignore[github-app] scoped to issues (write) and the org project (read)
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          DRY: ${{ inputs.dry && '--dry' || '' }}
